@@ -20,7 +20,26 @@
 
 ## 2. 两端快速部署
 
-以下路径是示例，请替换成实际位置。个人主机 `/Volumes/shared/sshbus` 和服务器 `/mnt/shared/sshbus` 必须指向同一个后端目录。第一台服务器节点名为 `gpu01`，登录账号为 `root`。
+以下使用环境变量 `SHARED_ROOT` 表示共享盘的挂载目录。两端的挂载路径可以不同，但必须指向同一个后端目录。第一台服务器节点名为 `gpu01`，登录账号为 `root`。
+
+分别在两端设置各自的实际挂载路径，例如：
+
+```bash
+# 个人主机
+export SHARED_ROOT="/Volumes/shared"
+
+# 服务器（在服务器终端执行，替换成实际挂载路径）
+export SHARED_ROOT="/mnt/shared"
+```
+
+以上设置只对当前 shell 及其子进程有效。要在之后打开的 Bash 终端中自动生效，请分别在两端将对应的 `export SHARED_ROOT="实际挂载路径"` 行写入各自的 `~/.bashrc`，然后执行 `source ~/.bashrc`；使用 Zsh 时写入 `~/.zshrc` 并执行 `source ~/.zshrc`。例如，服务器端可执行：
+
+```bash
+printf '%s\n' 'export SHARED_ROOT="/mnt/shared"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+请先把示例路径换成实际路径；个人主机也需在自己的配置文件中设置其挂载路径。若登录 shell 没有加载 `~/.bashrc`，请在它读取的配置文件（例如 `~/.bash_profile`）中加载 `~/.bashrc`，或将设置写入该文件。修改后可运行 `printf '%s\n' "$SHARED_ROOT"` 检查。以下命令由 shell 展开变量，因此路径即使包含空格也可以使用；每个运行部署命令的终端都需要先设置该变量。
 
 ### 2.1 准备目录和公钥
 
@@ -29,7 +48,7 @@
 在个人主机把现有登录公钥放到共享盘：
 
 ```bash
-cp ~/.ssh/id_ed25519.pub /Volumes/shared/my_laptop.pub
+cp ~/.ssh/id_ed25519.pub "$SHARED_ROOT/my_laptop.pub"
 ```
 
 仅复制 `.pub` 公钥，私钥保留在个人主机。若使用其他密钥，替换公钥路径和后面的 `--identity-file`。
@@ -40,9 +59,9 @@ cp ~/.ssh/id_ed25519.pub /Volumes/shared/my_laptop.pub
 
 ```bash
 bash deploy.sh server \
-  --share-root /mnt/shared/sshbus \
+  --share-root "$SHARED_ROOT/sshbus" \
   --node gpu01 \
-  --public-key /mnt/shared/my_laptop.pub \
+  --public-key "$SHARED_ROOT/my_laptop.pub" \
   --login-user root
 ```
 
@@ -56,7 +75,7 @@ bash deploy.sh server \
 
 ```bash
 bash deploy.sh client \
-  --share-root /Volumes/shared/sshbus \
+  --share-root "$SHARED_ROOT/sshbus" \
   --node gpu01 \
   --login-user root \
   --identity-file ~/.ssh/id_ed25519
