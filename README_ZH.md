@@ -95,6 +95,21 @@ bash deploy.sh client \
 ssh -F ~/.config/sharedfs-ssh/ssh_config gpu01 'hostname'
 ```
 
+如果希望直接使用 `ssh gpu01`，在客户端部署命令中添加 `--use-default-ssh-config`：
+
+```bash
+bash deploy.sh client \
+  --share-root "$SHARED_ROOT/sshbus" \
+  --node gpu01 \
+  --login-user root \
+  --identity-file ~/.ssh/id_ed25519 \
+  --use-default-ssh-config
+
+ssh gpu01 'hostname'
+```
+
+该选项会在 `~/.ssh/config` 开头创建或更新带标记的托管区块，保留区块外的原有内容；托管区块内包含此客户端配置目录中的所有节点。放在开头使这些节点的选项优先于原有的 `Host *` 设置。`dssh` 也会使用默认 SSH 配置。私有的节点资料、桥接脚本和 `known_hosts` 仍保存在 `--config-dir` 中；此模式不生成独立的 `ssh_config`。更新这些节点时请继续带上此选项，否则将更新独立配置而不会同步默认配置。已有同名 Host 的其他设置仍可能影响未在托管区块中指定的选项。
+
 ### 2.4 核对服务器身份
 
 服务器部署会输出主机公钥指纹。首次连接时，通过服务器控制台核对指纹后接受，后续沿用该身份。重复部署复用已有主机密钥，不应因再次安装而改变身份。
@@ -139,7 +154,7 @@ ssh -F ~/.config/sharedfs-ssh/ssh_config gpu01 'hostname'
 | `--share-group` | 未指定 | 设置服务器桥接进程使用的主组，并开启组共享；不代替目录组/ACL 配置 |
 | `--dry-run` | 关闭 | 显示计划，不部署 |
 
-个人主机另有 `--config-dir`、`--bin-dir`、`--identity-file`、`--host-public-key` 和 `--host-fingerprint`。精确适用参数：
+个人主机另有 `--config-dir`、`--bin-dir`、`--identity-file`、`--host-public-key`、`--host-fingerprint` 和 `--use-default-ssh-config`。精确适用参数：
 
 ```bash
 bash deploy.sh server --help

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Repeatable deployment of a dedicated loopback sshd and sharedfs-ssh bridge.
 
-Never edits ~/.ssh or the system's sshd configuration. Server deployment requires
-root; --dry-run performs read-only checks and prints the intended configuration.
+The client can optionally update ~/.ssh/config. Server deployment requires root;
+--dry-run performs read-only checks and prints the intended configuration.
 """
 import argparse
 import base64
@@ -28,6 +28,8 @@ import uuid
 
 VERSION = 1
 MARKER = "# Managed by sharedfs-ssh deploy.py"
+BLOCK_BEGIN = "# BEGIN sharedfs-ssh managed hosts"
+BLOCK_END = "# END sharedfs-ssh managed hosts"
 NODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 USER = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}\Z")
 KEY_TYPES = {"ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384",
@@ -563,6 +565,18 @@ def render_client_config(profiles, config_dir, bridge, python):
     return "\n".join(lines) + "\n"
 
 
+def merge_default_config(existing, config):
+    """Put managed hosts first so their options take precedence over Host * entries."""
+    lines = existing.splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines) if line.rstrip("\r\n") == BLOCK_BEGIN]
+    ends = [i for i, line in enumerate(lines) if line.rstrip("\r\n") == BLOCK_END]
+    if len(starts) != len(ends) or len(starts) > 1 or (starts and starts[0] >= ends[0]):
+        raise DeployError("Malformed sharedfs-ssh managed block in default SSH config")
+    if starts:
+        existing = "".join(lines[:starts[0]] + lines[ends[0] + 1:])
+    return BLOCK_BEGIN + "\n" + config + "\nHost *\n" + BLOCK_END + "\n" + existing
+
+
 def client(args):
     config_dir = path_value(args.config_dir or "~/.config/sharedfs-ssh")
     bin_dir = path_value(args.bin_dir or "~/.local/bin")
@@ -597,16 +611,30 @@ def client(args):
     profiles[args.node] = {"login_user": args.login_user, "share_root": str(share), "identity_file": str(identity),
         "host_key": host_key, "transport_args": timing_args(args), "connect_timeout": args.connect_timeout}
     config = render_client_config(profiles, config_dir, config_dir / "sharedfs_ssh.py", python)
-    wrapper = "#!/bin/sh\n" + MARKER + "; config=" + str(config_dir) + "\nexec " + shlex.join([ssh, "-F", str(config_dir / "ssh_config")]) + ' "$@"\n'
-    for target, header in ((config_dir / "ssh_config", MARKER), (bin_dir / "dssh", "#!/bin/sh\n" + MARKER + "; config=" + str(config_dir) + "\n")):
+    default_config = path_value("~/.ssh/config") if args.use_default_ssh_config else None
+    target_config = default_config or config_dir / "ssh_config"
+    if default_config:
+        reject_shared(default_config, share)
+        validate_local_path(default_config)
+        config = merge_default_config(default_config.read_text() if default_config.exists() else "", config)
+    wrapper_command = [ssh] if default_config else [ssh, "-F", str(target_config)]
+    wrapper = "#!/bin/sh\n" + MARKER + "; config=" + str(config_dir) + "\nexec " + shlex.join(wrapper_command) + ' "$@"\n'
+    targets = [(bin_dir / "dssh", "#!/bin/sh\n" + MARKER + "; config=" + str(config_dir) + "\n")]
+    if not default_config:
+        targets.append((target_config, MARKER))
+    for target, header in targets:
         if target.exists() and not target.read_text().startswith(header):
             raise DeployError("Refusing to overwrite an unrelated file: " + str(target))
     if args.dry_run:
         print("# Will install wrapper: " + str(bin_dir / "dssh"))
+        print("# Client config: " + str(target_config))
         print(config)
         return
     create_directories(config_dir, 0o700)
     create_directories(bin_dir, 0o755)
+    if default_config:
+        create_directories(default_config.parent, 0o700)
+        validate_local_path(default_config)
     for name in ("profiles.json", "ssh_config", "known_hosts", "sharedfs_ssh.py"):
         validate_local_path(config_dir / name)
     known = (config_dir / "known_hosts").read_text() if (config_dir / "known_hosts").exists() else ""
@@ -630,10 +658,10 @@ def client(args):
             known = known.rstrip("\n") + ("\n" if known else "") + entry + "\n"
     atomic_write(config_dir / "known_hosts", known)
     atomic_write(config_dir / "profiles.json", json.dumps(profiles, indent=2) + "\n")
-    atomic_write(config_dir / "ssh_config", config)
+    atomic_write(target_config, config)
     atomic_write(config_dir / "sharedfs_ssh.py", bridge_source.read_bytes(), 0o644)
     atomic_write(bin_dir / "dssh", wrapper, 0o755)
-    print("Client config: " + str(config_dir / "ssh_config"))
+    print("Client config: " + str(target_config))
     print("Run: " + shlex.join([str(bin_dir / "dssh"), args.node, "hostname"]))
     if not host_key:
         print("First connection will ASK about the host key; compare its fingerprint with the server's trusted console.")
@@ -700,6 +728,8 @@ def main():
     client_parser.add_argument("--host-fingerprint", help="SHA256:... verified through a trusted server console; required with --host-public-key")
     client_parser.add_argument("--config-dir")
     client_parser.add_argument("--bin-dir")
+    client_parser.add_argument("--use-default-ssh-config", action="store_true",
+                               help="manage host entries in ~/.ssh/config for direct ssh access")
     add_timing(client_parser)
     for name in ("start", "stop", "status", "_supervise"):
         command = commands.add_parser(name)

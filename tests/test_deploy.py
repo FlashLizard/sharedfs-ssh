@@ -152,6 +152,41 @@ class DeploymentValidation(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(tree_metadata(self.base), before)
 
+    def test_default_ssh_config_preserves_existing_entries_and_updates_managed_hosts(self):
+        home = self.base / "home"
+        ssh_dir = home / ".ssh"
+        ssh_dir.mkdir(parents=True, mode=0o700)
+        config = ssh_dir / "config"
+        original = "Host *\n    User existing-user\n\nHost other\n    HostName example.org\n"
+        config.write_text(original)
+        config.chmod(0o600)
+        env = dict(self.environment, HOME=str(home))
+        args = self.client_args() + ["--use-default-ssh-config"]
+        dry = cli(args + ["--dry-run"], python=self.python, environment=env)
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertEqual(config.read_text(), original)
+        for _ in range(2):
+            result = cli(args, python=self.python, environment=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(config.read_text().count(self.deploy.BLOCK_BEGIN), 1)
+        self.assertTrue(config.read_text().endswith(original))
+        self.assertFalse((self.base / "client config" / "ssh_config").exists())
+        second = args[:]
+        second[second.index("--node") + 1] = "gpu02"
+        result = cli(second, python=self.python, environment=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Host gpu01", config.read_text())
+        self.assertIn("Host gpu02", config.read_text())
+        result = subprocess.run(["ssh", "-G", "-F", str(config), "gpu01"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("user " + test_bridge.pwd.getpwuid(os.getuid()).pw_name + "\n", result.stdout)
+        self.assertIn("proxycommand ", result.stdout)
+
+    def test_malformed_default_config_block_is_rejected(self):
+        with self.assertRaises(self.deploy.DeployError):
+            self.deploy.merge_default_config(self.deploy.BLOCK_BEGIN + "\n", "Host gpu01\n")
+
     def test_host_key_generation_is_idempotent_and_config_avoids_home(self):
         state = self.base / "server state"
         state.mkdir(mode=0o700)
