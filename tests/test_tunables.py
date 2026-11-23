@@ -14,6 +14,44 @@ spec = importlib.util.spec_from_file_location("bridge_under_test", SCRIPT)
 bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
 
+deploy_spec = importlib.util.spec_from_file_location("deploy_edit_test", SCRIPT.parent / "deploy.py")
+deploy = importlib.util.module_from_spec(deploy_spec)
+deploy_spec.loader.exec_module(deploy)
+
+
+class EditConfiguration(unittest.TestCase):
+    def test_edit_restores_saved_options_and_only_changes_requested_values(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            (state / "sshd_config").write_text(deploy.MARKER + "\nUsePAM yes\n")
+            manifest = {"node": "gpu01", "login_user": "root", "manager": "supervisor",
+                        "share_gid": 42, "bridge_cmd": ["python3", "bridge.py", "server",
+                        "--root", "/shared/sshbus", "--node", "gpu01", "--ssh-port", "2223",
+                        "--poll", "0.05", "--max-sessions", "12", "--group-share"]}
+            captured = []
+            with mock.patch.object(sys, "argv", ["deploy.py", "edit", "--state-dir", directory,
+                                                "--node", "gpu01", "--poll", "0.08"]), \
+                 mock.patch.object(deploy, "load_deployment", return_value=manifest), \
+                 mock.patch.object(deploy, "validate_local_path"), \
+                 mock.patch.object(deploy, "server", side_effect=captured.append):
+                self.assertEqual(deploy.main(), 0)
+            args = captured[0]
+            self.assertEqual(args.poll, .08)
+            self.assertEqual(args.ssh_port, 2223)
+            self.assertEqual(args.max_sessions, 12)
+            self.assertEqual(args.share_root, "/shared/sshbus")
+            self.assertEqual(args.share_group, "42")
+            self.assertEqual(args.pam, "yes")
+            self.assertIsNone(args.public_key)
+
+    def test_edit_rejects_invalid_overrides_before_restarting(self):
+        args = mock.Mock(node="gpu01", state_dir=None)
+        manifest = {"node": "gpu01", "manager": "none"}
+        with mock.patch.object(deploy, "load_deployment", return_value=manifest):
+            with self.assertRaises(deploy.DeployError):
+                deploy.edit_server_args(args, None)
+
 
 class TimingConfiguration(unittest.TestCase):
     def invoke(self, extra, role="server"):

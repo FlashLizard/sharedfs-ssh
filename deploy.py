@@ -457,7 +457,13 @@ def server(args):
     if any(within(state, forbidden) for forbidden in
            (Path("/etc/ssh"), Path(login.pw_dir) / ".ssh", Path.home() / ".ssh")):
         raise DeployError("Server state must not be inside /etc/ssh or a user's .ssh directory")
-    key = validate_public_key(path_value(args.public_key))
+    if args.public_key:
+        key = validate_public_key(path_value(args.public_key))
+    else:
+        validate_local_path(state / "authorized_keys", owner=os.geteuid() if args.dry_run else 0)
+        if not (state / "authorized_keys").is_file():
+            raise DeployError("Existing authorized_keys is missing; redeploy with --public-key")
+        key = None
     sshd = str(path_value(executable("sshd")))
     python = str(path_value(Path(sys.executable).resolve()))
     for binary in (sshd, python):
@@ -520,7 +526,8 @@ def server(args):
             for required in ("passwordauthentication no", "pubkeyauthentication yes", "authenticationmethods publickey"):
                 if required not in effective.splitlines():
                     raise DeployError("Dedicated sshd did not retain required policy: " + required)
-            append_authorized_key(state / "authorized_keys", key)
+            if key is not None:
+                append_authorized_key(state / "authorized_keys", key)
             os.chmod(state / "authorized_keys", 0o644)
             os.replace(candidate, state / "sshd_config")
         finally:
@@ -706,6 +713,56 @@ def add_timing(parser, server_mode=False):
         parser.add_argument("--max-sessions", type=int, default=8)
 
 
+def edit_server_args(edit, parser):
+    """Reconstruct server options from the saved deployment, then apply overrides."""
+    state = path_value(edit.state_dir or "/var/lib/sharedfs-ssh/" + edit.node)
+    manifest = load_deployment(state)
+    if edit.node and manifest.get("node") != edit.node:
+        raise DeployError("Node does not match the saved deployment")
+    if manifest.get("manager") == "foreground":
+        raise DeployError("Edit cannot restart foreground mode; stop it and redeploy explicitly")
+    if manifest.get("manager") == "none":
+        raise DeployError("Configuration-only deployment has no service to restart; redeploy with a service manager")
+    bridge = manifest.get("bridge_cmd", [])
+    if len(bridge) < 4 or bridge[2] != "server":
+        raise DeployError("Invalid saved bridge command")
+    config_path = state / "sshd_config"
+    validate_local_path(config_path, owner=0)
+    config = config_path.read_text()
+    if not config.startswith(MARKER + "\n"):
+        raise DeployError("Refusing to use an unrelated sshd_config")
+    pam = re.search(r"(?m)^UsePAM (yes|no)$", config)
+    if not pam:
+        raise DeployError("Cannot determine saved UsePAM setting")
+    saved = ["server", "--node", manifest["node"], "--login-user", manifest["login_user"],
+             "--state-dir", str(state), "--service-manager", manifest["manager"],
+             "--pam", pam.group(1), "--public-key", "/unused"]
+    bridge_options = bridge[3:]
+    # The saved command has its own root and node; retain all its transport settings.
+    for index in range(0, len(bridge_options)):
+        option = bridge_options[index]
+        if option == "--root":
+            saved += ["--share-root", bridge_options[index + 1]]
+        elif option == "--node":
+            pass
+        elif index and bridge_options[index - 1] in ("--root", "--node"):
+            continue
+        else:
+            saved.append(option)
+    if manifest.get("share_gid") is not None:
+        saved += ["--share-group", str(manifest["share_gid"])]
+    restored = parser.parse_args(saved)
+    restored.public_key = None
+    for name in ("share_root", "ssh_port", "pam", "share_group", "poll", "control_interval",
+                 "heartbeat", "peer_timeout", "connect_timeout", "window", "chunk_size",
+                 "group_share", "scan_interval", "max_sessions"):
+        value = getattr(edit, name, None)
+        if value is not None:
+            setattr(restored, name, value)
+    restored.dry_run = edit.dry_run
+    return restored
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -731,6 +788,19 @@ def main():
     client_parser.add_argument("--use-default-ssh-config", action="store_true",
                                help="manage host entries in ~/.ssh/config for direct ssh access")
     add_timing(client_parser)
+    edit_parser = commands.add_parser("edit", help="update a server node and restart its services")
+    edit_parser.add_argument("--node")
+    edit_parser.add_argument("--state-dir")
+    edit_parser.add_argument("--dry-run", action="store_true")
+    edit_parser.add_argument("--share-root")
+    edit_parser.add_argument("--ssh-port", type=int)
+    edit_parser.add_argument("--pam", choices=("auto", "yes", "no"))
+    edit_parser.add_argument("--share-group")
+    for name in ("poll", "control-interval", "heartbeat", "peer-timeout", "connect-timeout", "scan-interval"):
+        edit_parser.add_argument("--" + name, type=float)
+    for name in ("window", "chunk-size", "max-sessions"):
+        edit_parser.add_argument("--" + name, type=int)
+    edit_parser.add_argument("--group-share", action="store_true", default=None)
     for name in ("start", "stop", "status", "_supervise"):
         command = commands.add_parser(name)
         command.add_argument("--state-dir")
@@ -738,6 +808,14 @@ def main():
     args = parser.parse_args()
     if getattr(args, "node", None) and (not NODE.fullmatch(args.node) or args.node in (".", "..")):
         parser.error("invalid node name")
+    if args.command == "edit":
+        if not args.node and not args.state_dir:
+            parser.error("provide --node or --state-dir")
+        try:
+            args = edit_server_args(args, parser)
+        except (DeployError, OSError, KeyError, ValueError, IndexError) as exc:
+            print("deploy: " + str(exc), file=sys.stderr)
+            return 1
     if hasattr(args, "login_user") and not USER.fullmatch(args.login_user):
         parser.error("invalid login user name")
     if args.command in ("server", "client"):
