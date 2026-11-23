@@ -180,7 +180,15 @@ NFS/SMB 缓存可能比 poll 更慢。如果 100 ms 改到 50 ms 没改善，应
 
 ## 6. 在你的共享盘上测速
 
-先正常连接一次并核验主机身份。若私钥有口令，需要先让 ssh-agent 可以使用它；测速使用 BatchMode，不交互询问口令。
+在已部署客户端的机器上运行测速，先正常连接一次并核验主机身份。若私钥有口令，需要先让 ssh-agent 可以使用它；测速使用 BatchMode，不交互询问口令。
+
+如果客户端使用 `--use-default-ssh-config` 部署，省略 `--config`，让 SSH 使用默认配置：
+
+```bash
+python3 benchmark.py --host gpu01 --samples 20 --label poll-100ms
+```
+
+如果使用默认生成的独立配置，指定实际配置文件路径：
 
 ```bash
 python3 benchmark.py \
@@ -189,6 +197,8 @@ python3 benchmark.py \
   --samples 20 \
   --label poll-100ms
 ```
+
+若部署时指定过 `--config-dir`，将上面的路径换成该目录下的 `ssh_config`。例如 `~/.config/ssh_config` 并非默认生成路径。
 
 结果分别报告建连时间，以及持续连接内小请求往返时间的中位数、P95 估计和最大值。`--label` 只是一段备注，不会修改参数。
 
