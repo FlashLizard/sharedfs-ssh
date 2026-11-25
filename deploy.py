@@ -572,16 +572,42 @@ def render_client_config(profiles, config_dir, bridge, python):
     return "\n".join(lines) + "\n"
 
 
-def merge_default_config(existing, config):
+def merge_default_config(existing, config, previous_config=None):
     """Put managed hosts first so their options take precedence over Host * entries."""
     lines = existing.splitlines(keepends=True)
-    starts = [i for i, line in enumerate(lines) if line.rstrip("\r\n") == BLOCK_BEGIN]
-    ends = [i for i, line in enumerate(lines) if line.rstrip("\r\n") == BLOCK_END]
-    if len(starts) != len(ends) or len(starts) > 1 or (starts and starts[0] >= ends[0]):
-        raise DeployError("Malformed sharedfs-ssh managed block in default SSH config")
-    if starts:
-        existing = "".join(lines[:starts[0]] + lines[ends[0] + 1:])
-    return BLOCK_BEGIN + "\n" + config + "\nHost *\n" + BLOCK_END + "\n" + existing
+    markers = [(i, line.strip(" \t\r\n")) for i, line in enumerate(lines)
+               if line.strip(" \t\r\n") in (BLOCK_BEGIN, BLOCK_END)]
+    boundaries = [marker for _, marker in markers]
+    reset = "\nHost *\n"
+    if boundaries == [BLOCK_BEGIN, BLOCK_END] * (len(markers) // 2):
+        blocks = [(markers[i][0], markers[i + 1][0] + 1) for i in range(0, len(markers), 2)]
+    else:
+        blocks = []
+        # With one missing marker, remove only a body we can reconstruct exactly.
+        if len(markers) == 1 and previous_config is not None:
+            index, marker = markers[0]
+            body = (previous_config + reset).splitlines()
+            if marker == BLOCK_BEGIN:
+                start, end = index, index + 1 + len(body)
+                candidate = lines[start + 1:end]
+            else:
+                start, end = index - len(body), index + 1
+                candidate = lines[max(0, start):index]
+            if [line.rstrip("\r\n") for line in candidate] == body:
+                blocks = [(start, end)]
+        if not blocks:
+            locations = ", ".join("%s at line %d" % ("BEGIN" if marker == BLOCK_BEGIN else "END", i + 1)
+                                  for i, marker in markers)
+            raise DeployError("Cannot determine sharedfs-ssh block boundaries in ~/.ssh/config (%s). "
+                              "Check the BEGIN/END marker lines and rerun." % locations)
+    unmanaged = []
+    offset = 0
+    for start, end in blocks:
+        unmanaged.extend(lines[offset:start])
+        offset = end
+    unmanaged.extend(lines[offset:])
+    block = BLOCK_BEGIN + "\n" + config + reset + BLOCK_END + "\n"
+    return block + "".join(unmanaged)
 
 
 def client(args):
@@ -615,15 +641,22 @@ def client(args):
             raise DeployError("Host fingerprint mismatch/missing: pass --host-fingerprint SHA256:... verified through the server's trusted console")
     if old.get("host_key") and host_key != old["host_key"]:
         raise DeployError("Pinned host key changed; verify server identity and update the profile deliberately")
+    default_config = path_value("~/.ssh/config") if args.use_default_ssh_config else None
+    bridge = config_dir / "sharedfs_ssh.py"
+    previous_config = render_client_config(profiles, config_dir, bridge, python) if default_config and profiles else None
     profiles[args.node] = {"login_user": args.login_user, "share_root": str(share), "identity_file": str(identity),
         "host_key": host_key, "transport_args": timing_args(args), "connect_timeout": args.connect_timeout}
-    config = render_client_config(profiles, config_dir, config_dir / "sharedfs_ssh.py", python)
-    default_config = path_value("~/.ssh/config") if args.use_default_ssh_config else None
+    config = render_client_config(profiles, config_dir, bridge, python)
     target_config = default_config or config_dir / "ssh_config"
     if default_config:
         reject_shared(default_config, share)
         validate_local_path(default_config)
-        config = merge_default_config(default_config.read_text() if default_config.exists() else "", config)
+        try:
+            with default_config.open(newline="") as stream:
+                existing = stream.read()
+        except FileNotFoundError:
+            existing = ""
+        config = merge_default_config(existing, config, previous_config)
     wrapper_command = [ssh] if default_config else [ssh, "-F", str(target_config)]
     wrapper = "#!/bin/sh\n" + MARKER + "; config=" + str(config_dir) + "\nexec " + shlex.join(wrapper_command) + ' "$@"\n'
     targets = [(bin_dir / "dssh", "#!/bin/sh\n" + MARKER + "; config=" + str(config_dir) + "\n")]

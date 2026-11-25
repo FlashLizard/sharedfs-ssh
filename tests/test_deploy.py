@@ -52,6 +52,37 @@ def cli(arguments, timeout=30, python=None, environment=None):
                           capture_output=True, text=True, timeout=timeout, env=environment)
 
 
+class DefaultConfigMerge(unittest.TestCase):
+    def test_repairs_missing_markers_and_collapses_duplicate_blocks(self):
+        import deploy
+
+        old = deploy.MARKER + "\n\nHost gpu01\n    HostName gpu01\n"
+        new = old + "\nHost gpu02\n    HostName gpu02\n"
+        block = deploy.merge_default_config("", old).replace("\n", "\r\n")
+        personal = "# user configuration\r\nHost other\r\n    HostName example.org"
+        for damaged, preserved in (
+            (block.replace(deploy.BLOCK_BEGIN + "\r\n", "") + personal, personal),
+            (block.replace(deploy.BLOCK_END + "\r\n", "") + personal, personal),
+            (block + personal + "\r\n" + block, personal + "\r\n"),
+        ):
+            with self.subTest(config=damaged):
+                merged = deploy.merge_default_config(damaged, new, previous_config=old)
+                self.assertEqual(merged.count(deploy.BLOCK_BEGIN), 1)
+                self.assertEqual(merged.count(deploy.BLOCK_END), 1)
+                self.assertIn(new, merged)
+                self.assertEqual(merged.partition(deploy.BLOCK_END + "\n")[2], preserved)
+                self.assertEqual(deploy.merge_default_config(merged, new), merged)
+
+    def test_rejects_missing_marker_when_body_contains_unrecognized_settings(self):
+        import deploy
+
+        old = deploy.MARKER + "\n\nHost gpu01\n    HostName gpu01\n"
+        damaged = deploy.merge_default_config("", old).replace(deploy.BLOCK_END + "\n", "")
+        damaged = damaged.replace("\nHost *\n", "\n    Port 2200\n\nHost *\n")
+        with self.assertRaisesRegex(deploy.DeployError, "BEGIN at line 1"):
+            deploy.merge_default_config(damaged, old, previous_config=old)
+
+
 class DeploymentValidation(unittest.TestCase):
     def setUp(self):
         if not DEPLOY.exists():
@@ -171,17 +202,21 @@ class DeploymentValidation(unittest.TestCase):
         self.assertEqual(config.read_text().count(self.deploy.BLOCK_BEGIN), 1)
         self.assertTrue(config.read_text().endswith(original))
         self.assertFalse((self.base / "client config" / "ssh_config").exists())
+        config.write_text(config.read_text().replace(self.deploy.BLOCK_END, "  " + self.deploy.BLOCK_END + "\t"))
         second = args[:]
         second[second.index("--node") + 1] = "gpu02"
         result = cli(second, python=self.python, environment=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Host gpu01", config.read_text())
         self.assertIn("Host gpu02", config.read_text())
-        result = subprocess.run(["ssh", "-G", "-F", str(config), "gpu01"],
-                                capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("user " + test_bridge.pwd.getpwuid(os.getuid()).pw_name + "\n", result.stdout)
-        self.assertIn("proxycommand ", result.stdout)
+        self.assertTrue(config.read_text().endswith(original))
+        for node in ("gpu01", "gpu02"):
+            result = subprocess.run(["ssh", "-G", "-F", str(config), node],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("user " + test_bridge.pwd.getpwuid(os.getuid()).pw_name + "\n", result.stdout)
+            self.assertIn("proxycommand ", result.stdout)
+            self.assertIn("hostkeyalias sharedfs-ssh-" + node + "\n", result.stdout)
 
     def test_malformed_default_config_block_is_rejected(self):
         with self.assertRaises(self.deploy.DeployError):
