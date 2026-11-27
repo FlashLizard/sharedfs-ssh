@@ -797,6 +797,11 @@ def edit_server_args(edit, parser):
 
 
 def main():
+    if sys.version_info < (3, 9):
+        print("deploy: Python 3.9 or newer is required (running %s). "
+              "Use bash deploy.sh or pass --python /absolute/path/to/python3 to deploy.sh."
+              % sys.version.split()[0], file=sys.stderr)
+        return 1
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     server_parser = commands.add_parser("server")

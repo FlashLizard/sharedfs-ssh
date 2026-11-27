@@ -120,7 +120,19 @@ ssh gpu01 'hostname'
 
 ### 2.5 Conda 等 Python 环境
 
-服务器安装会检查将来常驻服务使用的解释器和 sshd 路径。如果当前 Conda Python 位于其他用户可写目录、共享盘或不可信的路径中，会拒绝安装。可选择系统中可信且满足版本要求的 Python，直接运行 `/usr/bin/python3 deploy.py server ...` 并带上相同参数。不要为了通过检查递归修改无关环境的权限；`/usr/bin/python3` 仅是常见位置，应以实际安装为准。
+`deploy.sh` 优先使用 PATH 上的 `python3`。如果它低于 3.9，脚本会尝试 `python3.11` 等带版本号的命令。`sudo` 可能使用不同的 PATH，因此当前终端能找到的 Python 在 `sudo` 下可能找不到。
+
+如果服务器已有可信的 Python 3.9 或更新版本，可以在子命令前用 `--python` 指定它的绝对路径。例如，如果 `/usr/bin/python3.11` 已安装，可这样运行（将 `/usr/bin/python3.11` 换成实际路径）：
+
+```bash
+sudo bash deploy.sh --python /usr/bin/python3.11 server \
+  --share-root "$SHARED_ROOT/sshbus" \
+  --node gpu01 \
+  --public-key "$SHARED_ROOT/my_laptop.pub" \
+  --login-user root
+```
+
+服务器会检查常驻服务使用的 Python 和 sshd 路径。请选择由管理员维护的本地解释器，其他用户可写目录或共享盘中的 Conda Python 可能无法通过检查。如果系统只有 Python 3.6，需要先由管理员安装受支持的版本，可与系统 Python 并存。
 
 ## 3. 多台服务器
 

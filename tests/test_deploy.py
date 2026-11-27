@@ -52,6 +52,31 @@ def cli(arguments, timeout=30, python=None, environment=None):
                           capture_output=True, text=True, timeout=timeout, env=environment)
 
 
+class DeployLauncher(unittest.TestCase):
+    def test_old_python_on_path_falls_back_to_a_supported_interpreter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bin_dir = Path(directory)
+            (bin_dir / "dirname").symlink_to(shutil.which("dirname"))
+            old = bin_dir / "python3"
+            old.write_text("#!/bin/sh\nexit 1\n")
+            old.chmod(0o755)
+            command = [shutil.which("bash"), str(PACKAGE / "deploy.sh")]
+            env = dict(os.environ, PATH=directory)
+
+            missing = subprocess.run(command + ["server", "--help"], env=env,
+                                     capture_output=True, text=True)
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("Python 3.9 or newer", missing.stderr)
+
+            (bin_dir / "python3.11").symlink_to(sys.executable)
+            for override in ([], ["--python", sys.executable]):
+                with self.subTest(override=override):
+                    result = subprocess.run(command + override + ["server", "--help"], env=env,
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("--public-key", result.stdout)
+
+
 class DefaultConfigMerge(unittest.TestCase):
     def test_repairs_missing_markers_and_collapses_duplicate_blocks(self):
         import deploy
