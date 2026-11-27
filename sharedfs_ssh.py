@@ -435,17 +435,38 @@ def server(args):
 
 
 def status(args):
+    max_age = args.max_age
+    if max_age is not None and (not math.isfinite(max_age) or max_age <= 0):
+        raise BridgeError("--max-age must be a positive finite number of seconds")
     root = Path(args.root).expanduser().resolve()
     if not root.is_dir():
-        raise BridgeError("shared root does not exist")
+        raise BridgeError("shared root is not a directory: " + str(root))
     print("NODE\tLAST_HEARTBEAT_AGE_S\tBOOT\tLOOPBACK_PORT")
+    found = False
     for node in sorted(root.iterdir()):
-        if node.is_dir() and not node.is_symlink():
-            metadata = read_json(node / "server.json")
-            if metadata:
-                age = max(0.0, time.time() - float(metadata.get("time", 0)))
-                print("%s\t%.1f\t%s\t%s" % (node.name, age, metadata.get("boot", "?"),
-                                               metadata.get("ssh_port", "?")))
+        heartbeat = node / "server.json"
+        try:
+            if node.is_symlink() or not node.is_dir() or heartbeat.is_symlink() or not heartbeat.is_file():
+                continue
+            metadata = read_json(heartbeat)
+            if not metadata:
+                continue
+            age = time.time() - float(metadata.get("time", 0))
+            if not math.isfinite(age):
+                raise ValueError("invalid heartbeat timestamp")
+        except (OSError, BridgeError, ValueError, TypeError, OverflowError) as exc:
+            log("skipping node %s: %s" % (node.name, exc))
+            continue
+        boot, port = metadata.get("boot", "?"), metadata.get("ssh_port", "?")
+        if max_age is not None:
+            if (abs(age) > max_age or metadata.get("protocol") != PROTOCOL
+                    or not NODE_RE.fullmatch(node.name) or metadata.get("node") != node.name
+                    or not SESSION_RE.fullmatch(str(boot)) or type(port) is not int or not 1 <= port <= 65535):
+                continue
+        print("%s\t%.1f\t%s\t%s" % (node.name, max(0.0, age), boot, port))
+        found = True
+    if max_age is not None and not found:
+        log("no live nodes found")
     return 0
 
 
@@ -481,6 +502,8 @@ def main():
                                  help="existing LOCAL directory for same-host single-daemon lock")
     command = sub.add_parser("status")
     command.add_argument("--root", required=True)
+    command.add_argument("--max-age", type=float, metavar="SECONDS",
+                         help="show only nodes with a heartbeat within this many seconds")
     args = parser.parse_args()
     if args.command != "status":
         timings = [args.poll, args.control_interval, args.heartbeat,

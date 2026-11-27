@@ -80,6 +80,34 @@ class DeployLauncher(unittest.TestCase):
                     self.assertIn("--public-key", result.stdout)
 
 
+class LiveNodes(unittest.TestCase):
+    def test_nodes_lists_recent_heartbeats_and_skips_stale_or_invalid_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            share = Path(directory)
+            now = time.time()
+            for name, timestamp in (("gpu01", now), ("gpu02", now - 30), ("gpu03", now + 300)):
+                node = share / name
+                node.mkdir()
+                (node / "server.json").write_text(json.dumps({"node": name, "time": timestamp,
+                    "protocol": 1, "boot": "a" * 32, "ssh_port": 2222}))
+            (share / "broken").mkdir()
+            (share / "broken" / "server.json").write_text("invalid JSON")
+
+            command = ["nodes", "--share-root", str(share)]
+            for flags, expected in (([], ["gpu01"]), (["--max-age", "60"], ["gpu01", "gpu02"])):
+                with self.subTest(flags=flags):
+                    result = cli(command + flags)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    nodes = [line.split("\t")[0] for line in result.stdout.splitlines()[1:]]
+                    self.assertEqual(nodes, expected)
+                    self.assertIn("skipping node broken", result.stderr)
+
+            (share / "gpu01" / "server.json").unlink()
+            result = cli(command)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("no live nodes found", result.stderr)
+
+
 class PythonOwnerOverride(unittest.TestCase):
     def test_server_accepts_only_the_explicit_python_owner(self):
         import contextlib

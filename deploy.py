@@ -718,6 +718,15 @@ def client(args):
         print("First connection will ASK about the host key; compare its fingerprint with the server's trusted console.")
 
 
+def list_nodes(args):
+    from sharedfs_ssh import BridgeError, status
+
+    try:
+        status(args)
+    except BridgeError as exc:
+        raise DeployError(str(exc)) from exc
+
+
 def lifecycle(args):
     if os.geteuid() != 0:
         raise DeployError("Server lifecycle commands require root")
@@ -817,6 +826,10 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     server_parser = commands.add_parser("server")
     client_parser = commands.add_parser("client")
+    nodes_parser = commands.add_parser("nodes", help="list live nodes visible on the shared filesystem")
+    nodes_parser.add_argument("--share-root", dest="root", required=True)
+    nodes_parser.add_argument("--max-age", type=float, default=10, metavar="SECONDS",
+                              help="maximum heartbeat age in seconds (default: 10)")
     for command in (server_parser, client_parser):
         command.add_argument("--share-root", required=True)
         command.add_argument("--node", required=True)
@@ -882,7 +895,7 @@ def main():
             parser.error("invalid scan interval, session limit, or port")
         if args.command == "client" and bool(args.host_public_key) != bool(args.host_fingerprint):
             parser.error("--host-public-key and --host-fingerprint must be provided together; otherwise omit both for first-connection ASK")
-    elif not args.state_dir and not args.node:
+    elif args.command != "nodes" and not args.state_dir and not args.node:
         parser.error("provide --state-dir or --node")
     os.umask(0o077)
     try:
@@ -890,6 +903,8 @@ def main():
             server(args)
         elif args.command == "client":
             client(args)
+        elif args.command == "nodes":
+            list_nodes(args)
         elif args.command == "_supervise":
             if os.geteuid() != 0:
                 raise DeployError("Supervisor requires root")
