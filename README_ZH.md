@@ -155,6 +155,15 @@ bash deploy.sh nodes --share-root "$SHARED_ROOT/sshbus"
 
 这个命令只读取共享盘上的心跳，无需 `sudo`，也能看到尚未注册到本机 SSH 配置的节点。默认列出心跳时间与客户端当前时间相差不超过 10 秒的节点。若服务器延长了心跳间隔，可用 `--max-age 30` 调整窗口（单位为秒）。两端时钟应大致同步。心跳表示桥接进程仍在更新状态，SSH 能否登录还需通过实际连接确认。
 
+加 `--details` 查看所有节点目录的状态，或用 `--node` 查看指定节点：
+
+```bash
+bash deploy.sh nodes --share-root "$SHARED_ROOT/sshbus" --details
+bash deploy.sh nodes --share-root "$SHARED_ROOT/sshbus" --node idc
+```
+
+详细视图显示 `ONLINE`（心跳有效）、`STALE`（心跳过期）或 `UNKNOWN`（无法判断，原因见 `DETAIL`）。同时显示最近心跳时间（UTC）、距今秒数、会话数和上限、本机 SSH 端口及桥接启动 ID。会话数取自最近一次心跳。旧版服务器仍可显示状态和心跳，活跃会话数显示为 `-`，更新并重启服务器桥接后即可看到该值。
+
 ## 4. 设置项
 
 以下是部署助手默认值；直接调用底层桥接时部分默认值不同，以其 --help 为准。时间参数单位均为秒。

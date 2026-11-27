@@ -8,6 +8,7 @@ must implement atomic same-directory rename and reasonably prompt visibility.
 """
 
 import argparse
+from datetime import datetime, timezone
 import errno
 import fcntl
 import hashlib
@@ -28,6 +29,7 @@ import uuid
 
 VERSION = "0.2.0"
 PROTOCOL = 1
+DEFAULT_MAX_AGE = 10
 NODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 SESSION_RE = re.compile(r"[0-9a-f]{32}\Z")
 STOP = threading.Event()
@@ -386,11 +388,11 @@ def server(args):
     try:
         while not STOP.is_set():
             now = time.monotonic()
+            active = {name: worker for name, worker in active.items() if worker.is_alive()}
             if now - last_heartbeat >= args.heartbeat:
                 beat(node / "server.json", protocol=PROTOCOL, boot=boot, node=args.node,
-                     ssh_port=args.ssh_port, max_sessions=args.max_sessions)
+                     ssh_port=args.ssh_port, max_sessions=args.max_sessions, active_sessions=len(active))
                 last_heartbeat = now
-            active = {name: worker for name, worker in active.items() if worker.is_alive()}
             if now >= next_scan and len(active) < args.max_sessions:
                 for session in sessions.iterdir():
                     if len(active) >= args.max_sessions:
@@ -434,39 +436,104 @@ def server(args):
     return 0
 
 
+def read_node_heartbeat(node):
+    heartbeat = node / "server.json"
+    if heartbeat.is_symlink() or not heartbeat.is_file():
+        return None
+    metadata = read_json(heartbeat)
+    if metadata is None:
+        return None
+    timestamp = float(metadata["time"])
+    if not math.isfinite(timestamp) or timestamp <= 0:
+        raise ValueError("invalid heartbeat timestamp")
+    return metadata, timestamp
+
+
+def heartbeat_status(node, metadata, age, max_age):
+    if metadata.get("protocol") != PROTOCOL:
+        return "UNKNOWN", "unsupported heartbeat protocol"
+    boot, port = metadata.get("boot"), metadata.get("ssh_port")
+    if (metadata.get("node") != node.name or not SESSION_RE.fullmatch(str(boot))
+            or type(port) is not int or not 1 <= port <= 65535):
+        return "UNKNOWN", "invalid node identity or loopback port"
+    if age < -max_age:
+        return "UNKNOWN", "heartbeat timestamp is ahead of client clock"
+    if age > max_age:
+        return "STALE", "heartbeat expired"
+    return "ONLINE", "-"
+
+
+def print_node_details(node, state, reason, metadata=None, timestamp=None, age=None):
+    metadata = metadata or {}
+    active, limit = metadata.get("active_sessions"), metadata.get("max_sessions")
+    port, boot = metadata.get("ssh_port"), metadata.get("boot")
+    seen = "-"
+    if timestamp is not None:
+        try:
+            seen = datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec="seconds")
+        except (OSError, OverflowError, ValueError):
+            seen = "invalid timestamp"
+    print(node.name, state, seen, "-" if age is None else "%.1f" % age,
+          active if type(active) is int and active >= 0 else "-",
+          limit if type(limit) is int and limit > 0 else "-",
+          port if type(port) is int and 1 <= port <= 65535 else "-",
+          boot if SESSION_RE.fullmatch(str(boot)) else "-", reason, sep="\t")
+
+
 def status(args):
-    max_age = args.max_age
+    details = args.details or args.node is not None
+    max_age = args.max_age if args.max_age is not None else (DEFAULT_MAX_AGE if details else None)
     if max_age is not None and (not math.isfinite(max_age) or max_age <= 0):
         raise BridgeError("--max-age must be a positive finite number of seconds")
     root = Path(args.root).expanduser().resolve()
     if not root.is_dir():
         raise BridgeError("shared root is not a directory: " + str(root))
-    print("NODE\tLAST_HEARTBEAT_AGE_S\tBOOT\tLOOPBACK_PORT")
+    if args.node is not None and (not NODE_RE.fullmatch(args.node) or args.node in (".", "..")):
+        raise BridgeError("--node must be a simple name (letters, digits, _, -, .)")
+    if details:
+        print("NODE\tSTATUS\tLAST_HEARTBEAT_UTC\tAGE_S\tACTIVE_SESSIONS\tMAX_SESSIONS\tLOOPBACK_PORT\tBOOT\tDETAIL")
+    else:
+        print("NODE\tLAST_HEARTBEAT_AGE_S\tBOOT\tLOOPBACK_PORT")
     found = False
-    for node in sorted(root.iterdir()):
-        heartbeat = node / "server.json"
-        try:
-            if node.is_symlink() or not node.is_dir() or heartbeat.is_symlink() or not heartbeat.is_file():
-                continue
-            metadata = read_json(heartbeat)
-            if not metadata:
-                continue
-            age = time.time() - float(metadata.get("time", 0))
-            if not math.isfinite(age):
-                raise ValueError("invalid heartbeat timestamp")
-        except (OSError, BridgeError, ValueError, TypeError, OverflowError) as exc:
-            log("skipping node %s: %s" % (node.name, exc))
+    nodes = [root / args.node] if args.node is not None else sorted(root.iterdir())
+    for node in nodes:
+        if (details or max_age is not None) and not NODE_RE.fullmatch(node.name):
             continue
-        boot, port = metadata.get("boot", "?"), metadata.get("ssh_port", "?")
-        if max_age is not None:
-            if (abs(age) > max_age or metadata.get("protocol") != PROTOCOL
-                    or not NODE_RE.fullmatch(node.name) or metadata.get("node") != node.name
-                    or not SESSION_RE.fullmatch(str(boot)) or type(port) is not int or not 1 <= port <= 65535):
+        try:
+            if node.is_symlink() or not node.is_dir():
+                if args.node is not None:
+                    print_node_details(node, "UNKNOWN", "node directory not found or is a symlink")
+                    found = True
                 continue
+            record = read_node_heartbeat(node)
+            if record is None:
+                if details:
+                    print_node_details(node, "UNKNOWN", "no readable heartbeat file")
+                    found = True
+                continue
+        except (OSError, BridgeError, KeyError, ValueError, TypeError, OverflowError) as exc:
+            if details:
+                reason = "cannot read heartbeat" if isinstance(exc, OSError) else "invalid heartbeat metadata"
+                print_node_details(node, "UNKNOWN", reason)
+                found = True
+            else:
+                log("skipping node %s: %s" % (node.name, exc))
+            continue
+        metadata, timestamp = record
+        age = time.time() - timestamp
+        if max_age is not None:
+            state, reason = heartbeat_status(node, metadata, age, max_age)
+            if details:
+                print_node_details(node, state, reason, metadata, timestamp, age)
+                found = True
+                continue
+            if state != "ONLINE":
+                continue
+        boot, port = metadata.get("boot", "?"), metadata.get("ssh_port", "?")
         print("%s\t%.1f\t%s\t%s" % (node.name, max(0.0, age), boot, port))
         found = True
     if max_age is not None and not found:
-        log("no live nodes found")
+        log("no node directories found" if details else "no live nodes found")
     return 0
 
 
@@ -503,7 +570,9 @@ def main():
     command = sub.add_parser("status")
     command.add_argument("--root", required=True)
     command.add_argument("--max-age", type=float, metavar="SECONDS",
-                         help="show only nodes with a heartbeat within this many seconds")
+                         help="maximum heartbeat age for an online node, in seconds")
+    command.add_argument("--details", action="store_true", help="show detailed states for all nodes")
+    command.add_argument("--node", help="show detailed state for one node")
     args = parser.parse_args()
     if args.command != "status":
         timings = [args.poll, args.control_interval, args.heartbeat,

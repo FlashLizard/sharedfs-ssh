@@ -88,8 +88,11 @@ class LiveNodes(unittest.TestCase):
             for name, timestamp in (("gpu01", now), ("gpu02", now - 30), ("gpu03", now + 300)):
                 node = share / name
                 node.mkdir()
-                (node / "server.json").write_text(json.dumps({"node": name, "time": timestamp,
-                    "protocol": 1, "boot": "a" * 32, "ssh_port": 2222}))
+                record = {"node": name, "time": timestamp, "protocol": 1, "boot": "a" * 32,
+                          "ssh_port": 2222, "max_sessions": 8}
+                if name == "gpu01":
+                    record["active_sessions"] = 2
+                (node / "server.json").write_text(json.dumps(record))
             (share / "broken").mkdir()
             (share / "broken" / "server.json").write_text("invalid JSON")
 
@@ -101,6 +104,24 @@ class LiveNodes(unittest.TestCase):
                     nodes = [line.split("\t")[0] for line in result.stdout.splitlines()[1:]]
                     self.assertEqual(nodes, expected)
                     self.assertIn("skipping node broken", result.stderr)
+
+            result = cli(command + ["--details"])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            header, *rows = [line.split("\t") for line in result.stdout.splitlines()]
+            nodes = {row[0]: dict(zip(header, row)) for row in rows}
+            self.assertEqual({name: row["STATUS"] for name, row in nodes.items()},
+                             {"gpu01": "ONLINE", "gpu02": "STALE", "gpu03": "UNKNOWN", "broken": "UNKNOWN"})
+            self.assertEqual(nodes["gpu01"]["ACTIVE_SESSIONS"], "2")
+            self.assertEqual(nodes["gpu01"]["MAX_SESSIONS"], "8")
+            self.assertEqual(nodes["gpu01"]["LOOPBACK_PORT"], "2222")
+            self.assertTrue(nodes["gpu01"]["LAST_HEARTBEAT_UTC"].endswith("+00:00"))
+            self.assertEqual(nodes["gpu02"]["ACTIVE_SESSIONS"], "-")
+            self.assertIn("ahead", nodes["gpu03"]["DETAIL"])
+            self.assertIn("invalid", nodes["broken"]["DETAIL"])
+
+            result = cli(command + ["--node", "gpu02", "--max-age", "60"])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([row.split("\t")[:2] for row in result.stdout.splitlines()[1:]], [["gpu02", "ONLINE"]])
 
             (share / "gpu01" / "server.json").unlink()
             result = cli(command)

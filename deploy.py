@@ -826,10 +826,12 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     server_parser = commands.add_parser("server")
     client_parser = commands.add_parser("client")
-    nodes_parser = commands.add_parser("nodes", help="list live nodes visible on the shared filesystem")
+    nodes_parser = commands.add_parser("nodes", help="show node status on the shared filesystem")
     nodes_parser.add_argument("--share-root", dest="root", required=True)
     nodes_parser.add_argument("--max-age", type=float, default=10, metavar="SECONDS",
                               help="maximum heartbeat age in seconds (default: 10)")
+    nodes_parser.add_argument("--details", action="store_true", help="show detailed states for all nodes")
+    nodes_parser.add_argument("--node", help="show detailed state for one node")
     for command in (server_parser, client_parser):
         command.add_argument("--share-root", required=True)
         command.add_argument("--node", required=True)
