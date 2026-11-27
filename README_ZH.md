@@ -134,6 +134,8 @@ sudo bash deploy.sh --python /usr/bin/python3.11 server \
 
 服务器会检查常驻服务使用的 Python 和 sshd 路径。请选择由管理员维护的本地解释器，其他用户可写目录或共享盘中的 Conda Python 可能无法通过检查。如果系统只有 Python 3.6，需要先由管理员安装受支持的版本，可与系统 Python 并存。
 
+如果服务器的 Python 位于由可信账号管理的 `/data` 下，而且报错明确指向 `Python` 路径的所有者，可以先用 `stat -c '%U (%u)' /data` 核对所有者，再给 `server` 命令加 `--trust-python-owner 用户名` 或 `--trust-python-owner UID`。建议同时用 `--python` 选定该解释器。该账号能修改解释器，因此也能让常驻服务以 `root` 执行修改后的代码。Python 路径仍须位于共享根目录之外，且组和其他用户不能写入。使用 `edit` 重新部署时，如果仍使用该解释器，需再次传入 `--trust-python-owner`。
+
 ## 3. 多台服务器
 
 第二台服务器重复相同的 server 命令，把 `--node` 改为 `gpu02`。个人主机也执行一次 client 命令加入 `gpu02`。已有其他节点会保留：

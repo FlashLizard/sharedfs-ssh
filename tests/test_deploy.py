@@ -11,11 +11,14 @@ import os
 from pathlib import Path
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 import venv
 
 import test_bridge
@@ -75,6 +78,48 @@ class DeployLauncher(unittest.TestCase):
                                             capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("--public-key", result.stdout)
+
+
+class PythonOwnerOverride(unittest.TestCase):
+    def test_server_accepts_only_the_explicit_python_owner(self):
+        import contextlib
+        import deploy
+        import io
+
+        data = Path("/sharedfs-ssh-test-data")
+        python = str(data / "python3")
+        owner = os.geteuid() + 1
+        arguments = [str(DEPLOY), "server", "--dry-run", "--node", "gpu01", "--share-root", str(PACKAGE),
+                     "--public-key", "unused", "--state-dir", "/sharedfs-ssh-test-state", "--pam", "no",
+                     "--service-manager", "none"]
+        original_lstat = Path.lstat
+        for flags, permissions, sshd, error in (
+            ([], 0o755, "/sharedfs-ssh-test-bin/sshd", "Python (%s): Local installation path has an untrusted owner" % python),
+            (["--trust-python-owner", str(owner + 1)], 0o755, "/sharedfs-ssh-test-bin/sshd", "untrusted owner"),
+            (["--trust-python-owner", "trusted-user"], 0o755, "/sharedfs-ssh-test-bin/sshd", None),
+            (["--trust-python-owner", str(owner)], 0o775, "/sharedfs-ssh-test-bin/sshd", "group/world writable"),
+            (["--trust-python-owner", str(owner)], 0o755, str(data / "sshd"), "sshd (%s): Local installation path has an untrusted owner" % (data / "sshd")),
+        ):
+            def lstat(path):
+                if path == data:
+                    return SimpleNamespace(st_uid=owner, st_mode=stat.S_IFDIR | permissions)
+                return original_lstat(path)
+
+            with self.subTest(flags=flags, permissions=permissions, sshd=sshd), \
+                 mock.patch.object(sys, "argv", arguments + flags), \
+                 mock.patch.object(sys, "platform", "linux"), \
+                 mock.patch.object(sys, "executable", python), \
+                 mock.patch.object(Path, "lstat", lstat), \
+                 mock.patch.object(deploy, "validate_public_key"), \
+                 mock.patch.object(deploy, "executable", return_value=sshd), \
+                 mock.patch.object(deploy.pwd, "getpwnam", return_value=SimpleNamespace(pw_dir="/root", pw_uid=owner)), \
+                 mock.patch.object(deploy.os, "umask"), \
+                 contextlib.redirect_stdout(io.StringIO()) as stdout, contextlib.redirect_stderr(io.StringIO()) as stderr:
+                self.assertEqual(deploy.main(), 0 if error is None else 1, stderr.getvalue())
+                if error is None:
+                    self.assertIn(python, stdout.getvalue())
+                else:
+                    self.assertIn(error, stderr.getvalue())
 
 
 class DefaultConfigMerge(unittest.TestCase):

@@ -466,9 +466,20 @@ def server(args):
         key = None
     sshd = str(path_value(executable("sshd")))
     python = str(path_value(Path(sys.executable).resolve()))
-    for binary in (sshd, python):
-        reject_shared(Path(binary), share)
-        validate_local_path(Path(binary), owner=os.geteuid() if args.dry_run else 0)
+    local_owner = os.geteuid() if args.dry_run else 0
+    python_owner = local_owner
+    trusted_owner = args.trust_python_owner
+    if trusted_owner is not None:
+        try:
+            python_owner = int(trusted_owner) if trusted_owner.isdecimal() else pwd.getpwnam(trusted_owner).pw_uid
+        except KeyError as exc:
+            raise DeployError("Unknown --trust-python-owner account: " + trusted_owner) from exc
+    for name, binary, owner in (("sshd", sshd, local_owner), ("Python", python, python_owner)):
+        try:
+            reject_shared(Path(binary), share)
+            validate_local_path(Path(binary), owner=owner)
+        except DeployError as exc:
+            raise DeployError("%s (%s): %s" % (name, binary, exc)) from exc
     executable("ssh-keygen")
     pam = detect_pam(args, sshd)
     previous = read_json(state / "deployment.json", {})
@@ -788,7 +799,7 @@ def edit_server_args(edit, parser):
     restored.public_key = None
     for name in ("share_root", "ssh_port", "pam", "share_group", "poll", "control_interval",
                  "heartbeat", "peer_timeout", "connect_timeout", "window", "chunk_size",
-                 "group_share", "scan_interval", "max_sessions"):
+                 "group_share", "scan_interval", "max_sessions", "trust_python_owner"):
         value = getattr(edit, name, None)
         if value is not None:
             setattr(restored, name, value)
@@ -839,6 +850,9 @@ def main():
     for name in ("window", "chunk-size", "max-sessions"):
         edit_parser.add_argument("--" + name, type=int)
     edit_parser.add_argument("--group-share", action="store_true", default=None)
+    for command in (server_parser, edit_parser):
+        command.add_argument("--trust-python-owner", metavar="USER_OR_UID",
+                             help="trust this additional owner for the server Python path and its ancestors")
     for name in ("start", "stop", "status", "_supervise"):
         command = commands.add_parser(name)
         command.add_argument("--state-dir")
