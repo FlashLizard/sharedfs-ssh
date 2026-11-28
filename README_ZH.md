@@ -172,7 +172,15 @@ bash deploy.sh diagnose --share-root "$SHARED_ROOT/sshbus" --node idc --duration
 
 默认每 0.25 秒读取一次，不建立 SSH 会话。`LIKELY_MULTIPLE_WRITERS` 表示某个启动 ID 切走后又带着更新的心跳出现，优先查找使用同一共享根目录和节点名的桥接进程。`ALTERNATING_IDS_WITHOUT_PROGRESS` 表示反复看到已有启动 ID，但没有确认到它发出更新，需同时排查共享盘缓存。`BOOT_CHANGED_DURING_WATCH` 表示观察到切换，但未看到旧 ID 回来。`ONE_BOOT_UPDATING` 表示这一轮只看到一个启动 ID 持续更新，命令返回 0。其他结果返回 1，并提示缺失、读取失败或停更等现象。修改过服务器心跳间隔时，可以相应调整 `--duration` 和 `--max-idle`。
 
-新版桥接上报写入主机名和桥接进程 PID，旧版对应列显示 `-`。在输出指向的服务器或容器控制台，可用 `sudo bash deploy.sh status --node idc` 核对本机托管实例，并用 `ps -p PID -o pid,ppid,user,args` 查看对应进程。旧版也会将启动 ID 写入桥接日志，可在候选服务器的 `bridge.log` 或 systemd 日志里搜索诊断输出的 `BOOT` 值。确认重复实例后，通过其原服务管理器停止它，或让它使用独立节点名，再重新观察 `idc`。
+新版桥接上报写入主机名和桥接进程 PID，旧版对应列显示 `-`。在每台候选服务器或容器的 Linux 控制台运行以下命令，将示例中的启动 ID 替换成 `diagnose` 输出中的 `BOOT`。如果部署用了自定义状态目录，带上相同的 `--state-dir`。
+
+```bash
+sudo bash deploy.sh locate --node idc \
+  --boot 0123456789abcdef0123456789abcdef \
+  --boot fedcba9876543210fedcba9876543210
+```
+
+`locate` 列出本机可见的相关进程、PID 和共享根目录，并从近期 `bridge.log` 或 systemd 日志匹配新旧版本的启动 ID。`LATEST_LOCAL_STARTUP` 表示最近一次本机日志里的启动 ID，`OLDER_LOCAL_STARTUP` 是历史记录，`NOT_FOUND_IN_RECENT_LOG` 表示近期日志未找到。结合 `PROCESS` 和服务状态确认哪套实例要保留，再使用输出中的 `stop` 命令停止重复的托管部署。手动启动的实例应从原启动入口停止。最后回到客户端重跑 `diagnose`，确认只剩一个启动 ID 更新。
 
 ## 4. 设置项
 

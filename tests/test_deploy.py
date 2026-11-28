@@ -163,6 +163,43 @@ class DiagnoseNode(unittest.TestCase):
             self.assertIn("host-a\t101", output.getvalue())
 
 
+class LocateBridge(unittest.TestCase):
+    def test_matches_legacy_startup_log_and_visible_processes_to_local_deployment(self):
+        import contextlib
+        import deploy
+        import io
+
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            old, latest = "a" * 32, "b" * 32
+            script = str(state / "sharedfs_ssh.py")
+            argv = ["/usr/bin/python3", script, "server", "--root", "/shared/sshbus", "--node", "idc"]
+            (state / "deployment.json").write_text(json.dumps({"node": "idc", "kind": "server",
+                "version": deploy.VERSION, "manager": "supervisor", "bridge_cmd": argv}))
+            (state / "bridge.log").write_text("".join(
+                "sharedfs-ssh: serving node %s -> 127.0.0.1:2222; boot %s\n" % (node, boot)
+                for node, boot in (("idc", old), ("idc", latest), ("other", "c" * 32))))
+            processes = {101: ("1", argv), 102: ("2", ["python3", "/checkout/sharedfs_ssh.py", "server",
+                                                      "--node=idc", "--root=/other/sshbus"]),
+                         103: ("3", ["python3", script, "client", "--node", "idc"])}
+            for boots in ([old, latest], [old]):
+                args = SimpleNamespace(node="idc", state_dir=directory, boot=boots)
+                with self.subTest(boots=boots), mock.patch.object(sys, "platform", "linux"), \
+                     mock.patch.object(deploy.os, "geteuid", return_value=0), \
+                     mock.patch.object(deploy, "validate_local_path"), \
+                     mock.patch.object(deploy, "running_supervisor", return_value=99), \
+                     mock.patch.object(Path, "iterdir", return_value=[Path(str(pid)) for pid in processes]), \
+                     mock.patch.object(deploy, "proc_identity", side_effect=processes.get), \
+                     contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(deploy.locate_bridge(args), 0)
+                text = output.getvalue()
+                self.assertIn("101 matches_manifest=yes", text)
+                self.assertIn("102 matches_manifest=no", text)
+                self.assertNotIn("pid=103", text)
+                self.assertIn(old + " OLDER_LOCAL_STARTUP", text)
+                self.assertEqual("deploy.sh stop" in text, latest in boots)
+
+
 class PythonOwnerOverride(unittest.TestCase):
     def test_server_accepts_only_the_explicit_python_owner(self):
         import contextlib

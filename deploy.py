@@ -18,6 +18,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import struct
 import subprocess
@@ -31,6 +32,7 @@ MARKER = "# Managed by sharedfs-ssh deploy.py"
 BLOCK_BEGIN = "# BEGIN sharedfs-ssh managed hosts"
 BLOCK_END = "# END sharedfs-ssh managed hosts"
 NODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
+BOOT_ID = re.compile(r"[0-9a-f]{32}\Z")
 USER = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}\Z")
 KEY_TYPES = {"ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384",
              "ecdsa-sha2-nistp521", "sk-ssh-ed25519@openssh.com",
@@ -729,6 +731,109 @@ def inspect_nodes(args):
         raise DeployError(str(exc)) from exc
 
 
+def bridge_option(arguments, flag):
+    for index, argument in enumerate(arguments):
+        if argument == flag and index + 1 < len(arguments):
+            return arguments[index + 1]
+        if argument.startswith(flag + "="):
+            return argument[len(flag) + 1:]
+    return None
+
+
+def local_bridge_processes(node):
+    for process in Path("/proc").iterdir():
+        if not process.name.isdecimal():
+            continue
+        pid = int(process.name)
+        identity = proc_identity(pid)
+        if not identity:
+            continue
+        _, command = identity
+        for index, (script, role) in enumerate(zip(command, command[1:])):
+            if Path(script).name == "sharedfs_ssh.py" and role == "server":
+                options = command[index + 2:]
+                if bridge_option(options, "--node") == node:
+                    yield pid, script, bridge_option(options, "--root"), command
+                break
+
+
+def recent_bridge_boots(state, manifest, node):
+    if manifest["manager"] == "systemd":
+        unit = manifest["units"][1]
+        source = "journal for " + unit
+        journal = subprocess.run([executable("journalctl"), "--unit=" + unit, "-n", "2000",
+                                  "-o", "cat", "--no-pager"], capture_output=True, text=True, timeout=10)
+        if journal.returncode:
+            raise DeployError("Cannot read " + source + ": " + journal.stderr.strip())
+        content = journal.stdout
+    else:
+        path = state / "bridge.log"
+        source = str(path)
+        validate_local_path(path, owner=0)
+        if not path.is_file():
+            return source, []
+        with path.open("rb") as log:
+            log.seek(max(0, log.seek(0, os.SEEK_END) - 256 * 1024))
+            content = log.read(256 * 1024).decode(errors="replace")
+    pattern = re.compile(r"^sharedfs-ssh: serving node " + re.escape(node) +
+                         r" -> 127\.0\.0\.1:[0-9]+; boot ([0-9a-f]{32})$", re.MULTILINE)
+    return source, pattern.findall(content)
+
+
+def locate_bridge(args):
+    if sys.platform != "linux":
+        raise DeployError("Run locate on a candidate Linux server or container")
+    if os.geteuid() != 0:
+        raise DeployError("Run locate as root to inspect managed logs and processes")
+    state = path_value(args.state_dir or "/var/lib/sharedfs-ssh/" + args.node)
+    print("HOST: %s\nNODE: %s\nSTATE_DIR: %s" % (socket.gethostname(), args.node, state))
+    validate_local_path(state / "deployment.json", owner=0)
+    manifest = load_deployment(state) if (state / "deployment.json").is_file() else None
+    if manifest and manifest.get("node") != args.node:
+        raise DeployError("State directory belongs to a different node: " + str(manifest.get("node")))
+
+    processes = sorted(local_bridge_processes(args.node))
+    matching_manifest = []
+    for pid, script, root, command in processes:
+        managed_command = manifest is not None and command == manifest.get("bridge_cmd")
+        if managed_command:
+            matching_manifest.append(pid)
+        print("PROCESS: pid=%d matches_manifest=%s root=%s script=%s"
+              % (pid, "yes" if managed_command else "no", json.dumps(root), json.dumps(script)))
+    if not processes:
+        print("PROCESS: no matching bridge process visible in this PID namespace")
+    if not manifest:
+        print("MANAGED: no deployment in this state directory")
+        return 1
+
+    manager = manifest["manager"]
+    print("MANAGER: " + manager)
+    if manager in ("supervisor", "foreground"):
+        supervisor = running_supervisor(state)
+        print("SUPERVISOR_PID: " + str(supervisor or "not running"))
+    else:
+        supervisor = None
+    try:
+        source, boots = recent_bridge_boots(state, manifest, args.node)
+    except subprocess.TimeoutExpired as exc:
+        raise DeployError("Timed out reading the bridge journal") from exc
+    print("LOG: " + source)
+    print("LAST_LOGGED_BOOT: " + (boots[-1] if boots else "not found"))
+    for boot in args.boot:
+        if boots and boot == boots[-1]:
+            result = "LATEST_LOCAL_STARTUP"
+        elif boot in boots:
+            result = "OLDER_LOCAL_STARTUP"
+        else:
+            result = "NOT_FOUND_IN_RECENT_LOG"
+        print("BOOT: %s %s" % (boot, result))
+    if boots and boots[-1] in args.boot and matching_manifest and (manager == "systemd" or supervisor):
+        stop = ["sudo", "bash", "deploy.sh", "stop", "--node", args.node, "--state-dir", str(state)]
+        print("To stop this managed deployment after confirming it is the unwanted instance:")
+        print(shlex.join(stop))
+    return int(bool(args.boot) and not any(boot in boots for boot in args.boot))
+
+
 def lifecycle(args):
     if os.geteuid() != 0:
         raise DeployError("Server lifecycle commands require root")
@@ -841,6 +946,10 @@ def main():
     diagnose_parser.add_argument("--interval", type=float, default=0.25, help="sampling interval in seconds (default: 0.25)")
     diagnose_parser.add_argument("--max-idle", type=float, default=10,
                                  help="maximum time in seconds without an observed update (default: 10)")
+    locate_parser = commands.add_parser("locate", help="match observed boot IDs to a candidate server's logs and processes")
+    locate_parser.add_argument("--node", required=True)
+    locate_parser.add_argument("--state-dir", help="local server state directory if customized")
+    locate_parser.add_argument("--boot", action="append", default=[], help="observed bridge boot ID; repeat to check more")
     for command in (server_parser, client_parser):
         command.add_argument("--share-root", required=True)
         command.add_argument("--node", required=True)
@@ -884,6 +993,8 @@ def main():
     args = parser.parse_args()
     if getattr(args, "node", None) and (not NODE.fullmatch(args.node) or args.node in (".", "..")):
         parser.error("invalid node name")
+    if args.command == "locate" and any(not BOOT_ID.fullmatch(boot) for boot in args.boot):
+        parser.error("--boot must be a 32-character lowercase hexadecimal bridge boot ID")
     if args.command == "edit":
         if not args.node and not args.state_dir:
             parser.error("provide --node or --state-dir")
@@ -916,6 +1027,8 @@ def main():
             client(args)
         elif args.command in ("nodes", "diagnose"):
             return inspect_nodes(args)
+        elif args.command == "locate":
+            return locate_bridge(args)
         elif args.command == "_supervise":
             if os.geteuid() != 0:
                 raise DeployError("Supervisor requires root")
