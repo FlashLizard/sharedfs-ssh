@@ -206,7 +206,8 @@ def quote_config(path):
 def render_sshd_config(state_dir, login_user, port, use_pam):
     state = Path(state_dir)
     return "\n".join([
-        MARKER, "Port %d" % port, "ListenAddress 127.0.0.1", "AddressFamily inet",
+        # Older sshd versions require AddressFamily before ListenAddress.
+        MARKER, "Port %d" % port, "AddressFamily inet", "ListenAddress 127.0.0.1",
         "HostKey " + quote_config(state / "ssh_host_ed25519_key"),
         "PidFile " + quote_config(state / "sshd.pid"),
         "AuthorizedKeysFile " + quote_config(state / "authorized_keys"),
