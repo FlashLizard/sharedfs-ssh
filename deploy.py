@@ -720,11 +720,11 @@ def client(args):
         print("First connection will ASK about the host key; compare its fingerprint with the server's trusted console.")
 
 
-def list_nodes(args):
-    from sharedfs_ssh import BridgeError, status
+def inspect_nodes(args):
+    from sharedfs_ssh import BridgeError, diagnose, status
 
     try:
-        status(args)
+        return diagnose(args) if args.command == "diagnose" else status(args)
     except BridgeError as exc:
         raise DeployError(str(exc)) from exc
 
@@ -834,6 +834,13 @@ def main():
                               help="maximum heartbeat age in seconds (default: 10)")
     nodes_parser.add_argument("--details", action="store_true", help="show detailed states for all nodes")
     nodes_parser.add_argument("--node", help="show detailed state for one node")
+    diagnose_parser = commands.add_parser("diagnose", help="watch a node for changing bridge boot IDs")
+    diagnose_parser.add_argument("--share-root", dest="root", required=True)
+    diagnose_parser.add_argument("--node", required=True)
+    diagnose_parser.add_argument("--duration", type=float, default=30, help="observation time in seconds (default: 30)")
+    diagnose_parser.add_argument("--interval", type=float, default=0.25, help="sampling interval in seconds (default: 0.25)")
+    diagnose_parser.add_argument("--max-idle", type=float, default=10,
+                                 help="maximum time in seconds without an observed update (default: 10)")
     for command in (server_parser, client_parser):
         command.add_argument("--share-root", required=True)
         command.add_argument("--node", required=True)
@@ -899,7 +906,7 @@ def main():
             parser.error("invalid scan interval, session limit, or port")
         if args.command == "client" and bool(args.host_public_key) != bool(args.host_fingerprint):
             parser.error("--host-public-key and --host-fingerprint must be provided together; otherwise omit both for first-connection ASK")
-    elif args.command != "nodes" and not args.state_dir and not args.node:
+    elif args.command not in ("nodes", "diagnose") and not args.state_dir and not args.node:
         parser.error("provide --state-dir or --node")
     os.umask(0o077)
     try:
@@ -907,8 +914,8 @@ def main():
             server(args)
         elif args.command == "client":
             client(args)
-        elif args.command == "nodes":
-            list_nodes(args)
+        elif args.command in ("nodes", "diagnose"):
+            return inspect_nodes(args)
         elif args.command == "_supervise":
             if os.geteuid() != 0:
                 raise DeployError("Supervisor requires root")

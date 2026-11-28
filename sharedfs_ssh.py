@@ -381,6 +381,7 @@ def server(args):
     sessions = node / "sessions"
     sessions.mkdir(exist_ok=True)
     boot = uuid.uuid4().hex
+    writer = {"writer_host": socket.gethostname(), "writer_pid": os.getpid()}
     active = {}
     retired = set()
     last_heartbeat, next_scan = 0.0, 0.0
@@ -391,7 +392,8 @@ def server(args):
             active = {name: worker for name, worker in active.items() if worker.is_alive()}
             if now - last_heartbeat >= args.heartbeat:
                 beat(node / "server.json", protocol=PROTOCOL, boot=boot, node=args.node,
-                     ssh_port=args.ssh_port, max_sessions=args.max_sessions, active_sessions=len(active))
+                     ssh_port=args.ssh_port, max_sessions=args.max_sessions,
+                     active_sessions=len(active), **writer)
                 last_heartbeat = now
             if now >= next_scan and len(active) < args.max_sessions:
                 for session in sessions.iterdir():
@@ -449,13 +451,19 @@ def read_node_heartbeat(node):
     return metadata, timestamp
 
 
-def heartbeat_status(node, metadata, age, max_age):
+def heartbeat_identity_error(node, metadata):
     if metadata.get("protocol") != PROTOCOL:
-        return "UNKNOWN", "unsupported heartbeat protocol"
+        return "unsupported heartbeat protocol"
     boot, port = metadata.get("boot"), metadata.get("ssh_port")
-    if (metadata.get("node") != node.name or not SESSION_RE.fullmatch(str(boot))
+    if (metadata.get("node") != node.name or not isinstance(boot, str) or not SESSION_RE.fullmatch(boot)
             or type(port) is not int or not 1 <= port <= 65535):
-        return "UNKNOWN", "invalid node identity or loopback port"
+        return "invalid node identity or loopback port"
+
+
+def heartbeat_status(node, metadata, age, max_age):
+    error = heartbeat_identity_error(node, metadata)
+    if error:
+        return "UNKNOWN", error
     if age < -max_age:
         return "UNKNOWN", "heartbeat timestamp is ahead of client clock"
     if age > max_age:
@@ -535,6 +543,98 @@ def status(args):
     if max_age is not None and not found:
         log("no node directories found" if details else "no live nodes found")
     return 0
+
+
+def diagnose(args):
+    if not 1 <= args.duration <= 600 or not 0.05 <= args.interval <= args.duration:
+        raise BridgeError("use --duration 1..600 and --interval 0.05..duration (seconds)")
+    if not math.isfinite(args.max_idle) or args.max_idle <= 0:
+        raise BridgeError("--max-idle must be a positive finite number of seconds")
+    node = node_directory(args)
+    print("Watching %s for %g seconds" % (node / "server.json", args.duration), flush=True)
+    print("ELAPSED_S\tEVENT\tBOOT\tWRITER_HOST\tWRITER_PID\tHEARTBEAT_AGE_S", flush=True)
+    start = time.monotonic()
+    deadline = start + args.duration
+    samples = gaps = switches = returns = advancing_returns = 0
+    seen = set()
+    latest = {}
+    previous_boot = last_sample = last_progress = None
+
+    while True:
+        samples += 1
+        elapsed = time.monotonic() - start
+        error = None
+        try:
+            record = None if node.is_symlink() else read_node_heartbeat(node)
+            if record is None:
+                error = "MISSING_HEARTBEAT"
+            else:
+                metadata, timestamp = record
+                if heartbeat_identity_error(node, metadata):
+                    error = "INVALID_HEARTBEAT"
+        except OSError:
+            error = "UNREADABLE_HEARTBEAT"
+        except (BridgeError, KeyError, TypeError, ValueError, OverflowError):
+            error = "INVALID_HEARTBEAT"
+
+        if error:
+            gaps += 1
+            if last_sample != error:
+                print("%.2f\t%s\t-\t-\t-\t-" % (elapsed, error), flush=True)
+            last_sample = error
+        else:
+            boot = metadata["boot"]
+            token = metadata.get("beat")
+            sample = (boot, token if isinstance(token, str) and SESSION_RE.fullmatch(token) else timestamp)
+            if sample != last_sample:
+                new_sample = sample not in seen
+                if new_sample:
+                    last_progress = time.monotonic()
+                event = "HEARTBEAT" if new_sample else "REPLAY"
+                if previous_boot is not None and boot != previous_boot:
+                    switches += 1
+                    if boot not in latest:
+                        event = "BOOT_CHANGED"
+                    else:
+                        returns += 1
+                        if new_sample and timestamp > latest[boot]:
+                            advancing_returns += 1
+                            event = "BOOT_RETURNED_WITH_NEW_HEARTBEAT"
+                        else:
+                            event = "BOOT_RETURNED_WITHOUT_PROGRESS"
+                host, pid = metadata.get("writer_host"), metadata.get("writer_pid")
+                host = host if isinstance(host, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,253}", host) else "-"
+                pid = pid if type(pid) is int and pid > 0 else "-"
+                print("%.2f\t%s\t%s\t%s\t%s\t%.1f" % (elapsed, event, boot, host, pid,
+                                                        time.time() - timestamp), flush=True)
+                seen.add(sample)
+                latest[boot] = max(latest.get(boot, timestamp), timestamp)
+                last_sample = sample
+                previous_boot = boot
+        delay = min(args.interval, deadline - time.monotonic())
+        if delay <= 0:
+            break
+        time.sleep(delay)
+
+    if advancing_returns:
+        result = "LIKELY_MULTIPLE_WRITERS"
+    elif returns:
+        result = "ALTERNATING_IDS_WITHOUT_PROGRESS"
+    elif switches:
+        result = "BOOT_CHANGED_DURING_WATCH"
+    elif not seen:
+        result = "NO_VALID_HEARTBEAT"
+    elif len(seen) == 1:
+        result = "NO_HEARTBEAT_UPDATES"
+    elif time.monotonic() - last_progress > args.max_idle:
+        result = "HEARTBEAT_UPDATES_STOPPED"
+    elif gaps:
+        result = "HEARTBEAT_READ_GAPS"
+    else:
+        result = "ONE_BOOT_UPDATING"
+    print("RESULT=%s samples=%d boots=%d switches=%d advancing_returns=%d missing_or_invalid=%d"
+          % (result, samples, len(latest), switches, advancing_returns, gaps))
+    return 0 if result == "ONE_BOOT_UPDATING" else 1
 
 
 def main():

@@ -129,6 +129,40 @@ class LiveNodes(unittest.TestCase):
             self.assertIn("no live nodes found", result.stderr)
 
 
+class DiagnoseNode(unittest.TestCase):
+    def test_distinguishes_returning_writer_from_restart_and_replayed_heartbeats(self):
+        import contextlib
+        import io
+        import sharedfs_ssh as bridge
+
+        def heartbeat(boot, stamp, pid):
+            return {"node": "idc", "protocol": bridge.PROTOCOL, "ssh_port": 2222,
+                    "boot": boot * 32, "writer_host": "host-" + boot, "writer_pid": pid}, stamp
+
+        a1, a2 = heartbeat("a", 100, 101), heartbeat("a", 102, 101)
+        b1, b2 = heartbeat("b", 101, 201), heartbeat("b", 103, 201)
+        args = SimpleNamespace(root=str(PACKAGE), node="idc", duration=1, interval=0.25, max_idle=10)
+        for records, expected, exit_code in (
+            ([a1, b1, a2, b2, b2], "LIKELY_MULTIPLE_WRITERS", 1),
+            ([a1, b1, a1, b1, b1], "ALTERNATING_IDS_WITHOUT_PROGRESS", 1),
+            ([a1, a1, b1, b2, b2], "BOOT_CHANGED_DURING_WATCH", 1),
+            ([a1, a1, a2, a2, a2], "ONE_BOOT_UPDATING", 0),
+        ):
+            elapsed = 0
+
+            def sleep(seconds):
+                nonlocal elapsed
+                elapsed += seconds
+
+            with self.subTest(expected=expected), mock.patch.object(bridge, "read_node_heartbeat", side_effect=records), \
+                 mock.patch.object(bridge.time, "monotonic", side_effect=lambda: elapsed), \
+                 mock.patch.object(bridge.time, "sleep", side_effect=sleep), \
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(bridge.diagnose(args), exit_code)
+            self.assertIn("RESULT=" + expected, output.getvalue())
+            self.assertIn("host-a\t101", output.getvalue())
+
+
 class PythonOwnerOverride(unittest.TestCase):
     def test_server_accepts_only_the_explicit_python_owner(self):
         import contextlib

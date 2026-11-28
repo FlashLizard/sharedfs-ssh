@@ -164,6 +164,16 @@ bash deploy.sh nodes --share-root "$SHARED_ROOT/sshbus" --node idc
 
 详细视图显示 `ONLINE`（心跳有效）、`STALE`（心跳过期）或 `UNKNOWN`（无法判断，原因见 `DETAIL`）。同时显示最近心跳时间（UTC）、距今秒数、会话数和上限、本机 SSH 端口及桥接启动 ID。会话数取自最近一次心跳。旧版服务器仍可显示状态和心跳，活跃会话数显示为 `-`，更新并重启服务器桥接后即可看到该值。
 
+如果 SSH 握手反复报 `server bridge restarted during connection`，可以在客户端连续观察该节点的心跳：
+
+```bash
+bash deploy.sh diagnose --share-root "$SHARED_ROOT/sshbus" --node idc --duration 30
+```
+
+默认每 0.25 秒读取一次，不建立 SSH 会话。`LIKELY_MULTIPLE_WRITERS` 表示某个启动 ID 切走后又带着更新的心跳出现，优先查找使用同一共享根目录和节点名的桥接进程。`ALTERNATING_IDS_WITHOUT_PROGRESS` 表示反复看到已有启动 ID，但没有确认到它发出更新，需同时排查共享盘缓存。`BOOT_CHANGED_DURING_WATCH` 表示观察到切换，但未看到旧 ID 回来。`ONE_BOOT_UPDATING` 表示这一轮只看到一个启动 ID 持续更新，命令返回 0。其他结果返回 1，并提示缺失、读取失败或停更等现象。修改过服务器心跳间隔时，可以相应调整 `--duration` 和 `--max-idle`。
+
+新版桥接上报写入主机名和桥接进程 PID，旧版对应列显示 `-`。在输出指向的服务器或容器控制台，可用 `sudo bash deploy.sh status --node idc` 核对本机托管实例，并用 `ps -p PID -o pid,ppid,user,args` 查看对应进程。旧版也会将启动 ID 写入桥接日志，可在候选服务器的 `bridge.log` 或 systemd 日志里搜索诊断输出的 `BOOT` 值。确认重复实例后，通过其原服务管理器停止它，或让它使用独立节点名，再重新观察 `idc`。
+
 ## 4. 设置项
 
 以下是部署助手默认值；直接调用底层桥接时部分默认值不同，以其 --help 为准。时间参数单位均为秒。
