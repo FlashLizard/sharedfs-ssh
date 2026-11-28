@@ -214,7 +214,8 @@ def render_sshd_config(state_dir, login_user, port, use_pam):
         "AllowUsers " + login_user, "StrictModes yes", "PubkeyAuthentication yes",
         "AuthenticationMethods publickey", "PasswordAuthentication no",
         "KbdInteractiveAuthentication no", "PermitEmptyPasswords no",
-        "PermitRootLogin prohibit-password", "UsePAM " + use_pam, "UseDNS no",
+        # The legacy spelling also works on sshd versions that predate prohibit-password.
+        "PermitRootLogin without-password", "UsePAM " + use_pam, "UseDNS no",
         "PermitUserEnvironment no", "X11Forwarding no", "GatewayPorts no",
         "LoginGraceTime 120", "MaxAuthTries 3", "LogLevel VERBOSE",
         "Subsystem sftp internal-sftp", "",

@@ -362,7 +362,7 @@ class DeploymentValidation(unittest.TestCase):
         lines = config.splitlines()
         self.assertLess(lines.index("AddressFamily inet"), lines.index("ListenAddress 127.0.0.1"))
         self.assertIn("PasswordAuthentication no", config)
-        self.assertIn("PermitRootLogin prohibit-password", config)
+        self.assertIn("PermitRootLogin without-password", config)
         self.assertIn("22222", config)
         config_path = state / "sshd_config"
         config_path.write_text(config)
